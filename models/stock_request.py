@@ -9,36 +9,31 @@ from odoo.tools.float_utils import float_compare
 class StockRequest(models.Model):
     _inherit = "stock.request"
 
-    transfer_by_product_categ = fields.Boolean(compute='_compute_transfer_by_product_categ')
-    categ_id = fields.Many2one('product.category', 'Product Category',states={'done': [('readonly', True)], 'cancel': [('readonly', True)]},)
-
-
-    @api.onchange('categ_id')
-    def on_change_categ_id(self):
-        self.move_line_ids = False
-
-    @api.depends('location_id')
-    def _compute_transfer_by_product_categ(self):
-        # TODO: we have to check if we should select the appropriate internal type here relying on the warehouse
-        internal_type = self.env.ref('stock.picking_type_internal')
-        for each in self:
-            each.transfer_by_product_categ = internal_type.transfer_by_product_categ
-
+    def _picking_by_product_categ(self):
+        self.ensure_one()
+        return self._get_picking_type().transfer_by_product_categ
 
     def _prepare_picking(self):
-        res = super(StockRequest,self)._prepare_picking()
-        if self.transfer_by_product_categ and self.categ_id:
-            res.update({'categ_id':self.categ_id.id})
-        return res
+        """ Inherit this method to create pickings by category if necessary"""
+        move_line_by_product_categ = self._split_move_line_by_product_categ()
+        # TODO:Here we have chosen the clarity and the decoupling of the modules to the detriment of the performance, we will overwrite each time the value of move_lines because the stock_request module must not be aware of the existence of this split by category
+        picking_dicts = []
+        for product_categ, move_lines in move_line_by_product_categ.items():
+            picking_dict = super(StockRequest, self)._prepare_picking()
+            picking_dict.update(
+                {'move_lines': [(0, 0, move_line._prepare_move_line(self.location_id.id, self.location_dest_id.id,
+                                                                    company=self.location_id.company_id.id)) for
+                                move_line in
+                                move_lines],
+                 'categ_id': product_categ.id})
+            picking_dicts.append(picking_dict)
+        return picking_dicts
 
-class StockRequestLine(models.Model):
-    _inherit = "stock.request.line"
-
-    transfer_by_product_categ = fields.Boolean(related='request_id.transfer_by_product_categ')
-
-    @api.onchange('transfer_by_product_categ')
-    def _onchange_transfer_by_product_categ(self):
-        if self.transfer_by_product_categ and self.request_id.categ_id:
-            return {'domain':{'product_id':[('categ_id','=',self.request_id.categ_id.id)]}}
-        elif self.transfer_by_product_categ and not self.request_id.categ_id:
-            return {'domain':{'product_id':[('id','=',-1)]}}
+    def _split_move_line_by_product_categ(self):
+        move_line_by_product_categ = {}
+        for move_line in self.move_line_ids:
+            try:
+                move_line_by_product_categ[move_line.product_id.categ_id] |= move_line
+            except KeyError:
+                move_line_by_product_categ.update({move_line.product_id.categ_id: move_line})
+        return move_line_by_product_categ
